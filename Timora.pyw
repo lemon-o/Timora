@@ -8,6 +8,7 @@ import os
 import ctypes
 import subprocess
 from datetime import datetime, timedelta
+from PyQt5.QtCore import QThread
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QTabWidget,
     QVBoxLayout, QHBoxLayout, QTimeEdit, QSpinBox, QFrame,
@@ -727,15 +728,26 @@ class MainWindow(QWidget):
         set_sleep_prevention(False)
         super().closeEvent(e)
 
+    def _run_cmd(self, args):
+        """在后台线程执行命令，避免阻塞 UI；CREATE_NO_WINDOW 防止闪现黑窗口"""
+        CREATE_NO_WINDOW = 0x08000000
+        def _worker():
+            subprocess.run(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        t = QThread(self)
+        t.run = _worker
+        t.start()
+
     def _do_shutdown(self, seconds: int):
-        subprocess.run(["shutdown", "/a"], capture_output=True)
-        subprocess.run(
-            ["shutdown", "/s", "/t", str(seconds), "/c", "Timora 自动关机"],
-            capture_output=True
-        )
+        self._run_cmd(["shutdown", "/a"])
+        self._run_cmd(["shutdown", "/s", "/t", str(seconds), "/c", "Timora 自动关机"])
 
     def _do_cancel(self):
-        subprocess.run(["shutdown", "/a"], capture_output=True)
+        self._run_cmd(["shutdown", "/a"])
 
 
 # ──────────────────────────── 入口 ────────────────────────────────
