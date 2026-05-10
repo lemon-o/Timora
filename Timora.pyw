@@ -33,6 +33,19 @@ BORDER       = "#1e2d42"
 
 R = "12px"
 
+# ─────────────────────── 路径辅助 ────────────────────────────────
+
+def _app_dir() -> str:
+    """
+    返回「程序工作目录」：
+    - PyInstaller 打包后：exe 文件所在目录（icon 文件夹需与 exe 同级）
+    - 源码直接运行：脚本文件所在目录
+    """
+    if getattr(sys, "frozen", False):
+        # 打包后 sys.executable 就是 exe 本身
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
 # ─────────────────────────── 样式表 ──────────────────────────────
 
 STYLE_SHEET = f"""
@@ -364,6 +377,10 @@ class ScheduleTab(QWidget):
         self.time_edit.setEnabled(False)
         self.sleep_cb.setEnabled(False)
         self._freeze_tabs(True)
+        h = self._remaining // 3600
+        m = (self._remaining % 3600) // 60
+        s = self._remaining % 60
+        self.countdown_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
         self.status_label.setText(f"将在 {t.toString('HH:mm:ss')} 自动关机")
         self.shutdown_requested.emit(self._remaining)
 
@@ -384,7 +401,7 @@ class ScheduleTab(QWidget):
     def _freeze_tabs(self, frozen: bool):
         """冻结/解冻 Tab 切换"""
         try:
-            tab_widget = self.parent().parent()  # ScheduleTab -> QStackedWidget -> QTabWidget
+            tab_widget = self.parent().parent()
             if hasattr(tab_widget, 'tabBar'):
                 tab_widget.tabBar().setEnabled(not frozen)
         except Exception:
@@ -535,10 +552,9 @@ class CountdownTab(QWidget):
         self._freeze_tabs(True)
         for btn in self._quick_btns:
             btn.setEnabled(False)
-        h = total // 3600
-        m = (total % 3600) // 60
-        s = total % 60
-        self.status_label.setText(f"倒计时 {h:02d}:{m:02d}:{s:02d} 后关机")
+        h, m, s = total // 3600, (total % 3600) // 60, total % 60
+        self.countdown_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+        self.status_label.setText(f"将在 {h:02d}:{m:02d}:{s:02d} 后关机")
         self.shutdown_requested.emit(total)
 
     def _on_cancel(self):
@@ -627,7 +643,7 @@ class MainWindow(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._drag_pos = None
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon", "Timora.png")
+        icon_path = os.path.join(_app_dir(), "icon", "Timora.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         self._build_ui()
@@ -660,7 +676,7 @@ class MainWindow(QWidget):
         icon_lbl.setFixedSize(32, 32)
         icon_lbl.setScaledContents(True)
         icon_lbl.setStyleSheet("background: transparent; border: none;")
-        _base = os.path.dirname(os.path.abspath(__file__))
+        _base = _app_dir()
         _icon_loaded = False
         for _name in ("Timora.png",):
             _p = os.path.join(_base, "icon", _name)
@@ -726,7 +742,18 @@ class MainWindow(QWidget):
 
     def closeEvent(self, e):
         set_sleep_prevention(False)
+        if hasattr(self, "_bat_timer") and self._bat_timer.isActive():
+            self._bat_timer.stop()
+        if hasattr(self, "_shutdown_delay_timer") and self._shutdown_delay_timer.isActive():
+            self._shutdown_delay_timer.stop()
+        self._remove_shutdown_bat()
         super().closeEvent(e)
+
+    _BAT_PATH = ""  # 运行时在 __init__ 后由 _get_bat_path() 动态确定
+
+    @staticmethod
+    def _get_bat_path() -> str:
+        return os.path.join(_app_dir(), "shutdown.bat")
 
     def _run_cmd(self, args):
         """在后台线程执行命令，避免阻塞 UI；CREATE_NO_WINDOW 防止闪现黑窗口"""
@@ -742,12 +769,83 @@ class MainWindow(QWidget):
         t.run = _worker
         t.start()
 
+    def _write_shutdown_bat(self):
+        """在工作目录创建 shutdown.bat（仅执行关机，需管理员权限）"""
+        bat_content = (
+            "@echo off\r\n"
+            "shutdown /s /t 0 /c \"Timora 自动关机\"\r\n"
+        )
+        with open(self._get_bat_path(), "w", encoding="mbcs") as f:
+            f.write(bat_content)
+
+    def _remove_shutdown_bat(self):
+        """删除 shutdown.bat（如果存在）"""
+        try:
+            p = self._get_bat_path()
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+    def _close_foreground_window(self):
+        """在用户会话中关闭当前前台窗口，排除标题含 Timora 的窗口"""
+        WM_CLOSE = 0x0010
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            if "Timora" in buf.value:
+                return
+            ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        except Exception:
+            pass
+
+    def _run_shutdown_bat(self):
+        """以管理员身份（runas）运行 shutdown.bat"""
+        bat = self._get_bat_path()
+        def _worker():
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "cmd.exe",
+                f"/c \"{bat}\"",
+                None, 0,
+            )
+        t = QThread(self)
+        t.run = _worker
+        t.start()
+
     def _do_shutdown(self, seconds: int):
-        self._run_cmd(["shutdown", "/a"])
-        self._run_cmd(["shutdown", "/s", "/t", str(seconds), "/c", "Timora 自动关机"])
+        """写入 bat 文件（后台线程），倒计时结束后触发关机"""
+        self._bat_timer = QTimer(self)
+        self._bat_timer.setSingleShot(True)
+        self._bat_timer.timeout.connect(self._on_bat_trigger)
+        self._bat_timer.start(seconds * 1000)
+
+        def _write():
+            self._write_shutdown_bat()
+        t = QThread(self)
+        t.run = _write
+        t.start()
+
+    def _on_bat_trigger(self):
+        """时间到：先关前台窗口，等待后再关机"""
+        # 1. 在用户会话中发送 WM_CLOSE 给前台窗口
+        self._close_foreground_window()
+        # 2. 等待 3 秒（给应用保存数据的时间），再提权执行关机
+        self._shutdown_delay_timer = QTimer(self)
+        self._shutdown_delay_timer.setSingleShot(True)
+        self._shutdown_delay_timer.timeout.connect(self._run_shutdown_bat)
+        self._shutdown_delay_timer.start(3000)
 
     def _do_cancel(self):
-        self._run_cmd(["shutdown", "/a"])
+        """取消：停止所有定时器并删除 bat 文件"""
+        if hasattr(self, "_bat_timer") and self._bat_timer.isActive():
+            self._bat_timer.stop()
+        if hasattr(self, "_shutdown_delay_timer") and self._shutdown_delay_timer.isActive():
+            self._shutdown_delay_timer.stop()
+        self._remove_shutdown_bat()
 
 
 # ──────────────────────────── 入口 ────────────────────────────────
