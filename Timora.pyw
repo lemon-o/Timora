@@ -753,7 +753,10 @@ class MainWindow(QWidget):
 
     @staticmethod
     def _get_bat_path() -> str:
-        return os.path.join(_app_dir(), "shutdown.bat")
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+        bat_dir = os.path.join(appdata, "Timora")
+        os.makedirs(bat_dir, exist_ok=True)
+        return os.path.join(bat_dir, "shutdown.bat")
 
     def _run_cmd(self, args):
         """在后台线程执行命令，避免阻塞 UI；CREATE_NO_WINDOW 防止闪现黑窗口"""
@@ -773,7 +776,7 @@ class MainWindow(QWidget):
         """在工作目录创建 shutdown.bat（仅执行关机，需管理员权限）"""
         bat_content = (
             "@echo off\r\n"
-            "shutdown /s /t 0 /c \"Timora 自动关机\"\r\n"
+            "shutdown /s /f /t 0 /c \"Timora 自动关机\"\r\n"
         )
         with open(self._get_bat_path(), "w", encoding="mbcs") as f:
             f.write(bat_content)
